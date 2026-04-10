@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  attendify-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: attendify_api
+    restart: always
+    ports:
+      - "8000:8000"
+    volumes:
+      - attendify_data:/app/data
+    environment:
+      - SECRET_KEY=${SECRET_KEY}
+      - DATABASE_URL=sqlite:///./data/attendance.db
+      - FACE_TOLERANCE=0.45
+      - QR_TTL_SECONDS=30
+
+volumes:
+  attendify_data:
