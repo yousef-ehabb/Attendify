@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.attendance import router as attendance_router
+from app.api.courses import router as courses_router
 from app.api.sessions import router as sessions_router
 from app.api.students import router as students_router
 from app.core.config import settings
@@ -45,6 +46,7 @@ if FRONTEND_ASSETS_DIR.exists():
 
 app.include_router(students_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
+app.include_router(courses_router, prefix="/api")
 app.include_router(attendance_router, prefix="/api")
 
 

@@ -14,7 +14,7 @@
  *   const result = useQRScanner(videoRef, (token) => handleToken(token));
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /* ── public types ───────────────────────────────────────────── */
 
@@ -23,6 +23,8 @@ export type OnQrDetected = (token: string) => void;
 export interface UseQRScannerReturn {
   /** Non-null when the scanner could not start or encounters an error. */
   error: string | null;
+  /** The error name string, if available. */
+  errorName: string | null;
   /** True while the rAF scan loop is actively running. */
   isScanning: boolean;
   /** The last detected QR token string (remains set until reset). */
@@ -70,6 +72,7 @@ export function useQRScanner(
 
   // Minimal React state — only for error display, scanning flag, and token.
   const [error, setError] = useState<string | null>(null);
+  const [errorName, setErrorName] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [detectedToken, setDetectedToken] = useState<string | null>(null);
   const [isSupported, setIsSupported] = useState(false);
@@ -115,7 +118,7 @@ export function useQRScanner(
 
   /* ── start / stop ─────────────────────────────────────── */
 
-  const start = async () => {
+  const start = useCallback(async () => {
     // Reset state.
     setError(null);
     setDetectedToken(null);
@@ -174,27 +177,33 @@ export function useQRScanner(
     } catch (err: unknown) {
       if (!activeRef.current) return;
 
+      let nameToSave = "UnknownError";
       if (err instanceof DOMException && err.name === "NotAllowedError") {
         setError(
           "Camera permission denied. Please allow camera access in your browser settings and try again.",
         );
+        nameToSave = err.name;
       } else if (err instanceof DOMException && err.name === "NotFoundError") {
         setError("No rear camera device found on this system.");
+        nameToSave = err.name;
       } else if (err instanceof DOMException && err.name === "NotReadableError") {
         setError(
           "Camera is already in use by another application. Close it and retry.",
         );
+        nameToSave = err.name;
       } else {
         setError(
           `Camera error: ${err instanceof Error ? err.message : "unknown"}`,
         );
+        nameToSave = err instanceof Error ? err.name : "UnknownError";
       }
 
+      setErrorName(nameToSave);
       setIsScanning(false);
     }
-  };
+  }, []); // dependencies can stay empty or add videoRef if needed, but videoRef is a RefObject.
 
-  const stop = () => {
+  const stop = useCallback(() => {
     activeRef.current = false;
 
     if (rafRef.current !== null) {
@@ -213,11 +222,11 @@ export function useQRScanner(
     }
 
     setIsScanning(false);
-  };
+  }, []);
 
-  const reset = () => {
+  const reset = useCallback(() => {
     setDetectedToken(null);
-  };
+  }, []);
 
   /* ── effect: init on mount, teardown on unmount ───────── */
 
@@ -247,5 +256,5 @@ export function useQRScanner(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoRef]);
 
-  return { error, isScanning, detectedToken, start, stop, reset, isSupported };
+  return { error, errorName, isScanning, detectedToken, start, stop, reset, isSupported };
 }

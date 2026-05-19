@@ -31,7 +31,7 @@ export interface UseFaceDetectionReturn {
 const WASM_BASE_URL = "/wasm";
 const MODEL_ASSET_PATH = "/models/blaze_face_short_range.tflite";
 const DETECT_INTERVAL_MS = 100;
-const LOAD_TIMEOUT_MS = 10000;
+const LOAD_TIMEOUT_MS = 30000;
 
 export function useFaceDetection(
   videoRef: React.RefObject<HTMLVideoElement | null>,
@@ -96,11 +96,14 @@ export function useFaceDetection(
             width: bb.width / vW,
             height: bb.height / vH,
           });
-          setLandmarks((best.keypoints ?? []).map(kp => ({
-            name: kp.label ?? "unknown",
-            x: kp.x,
-            y: kp.y,
-          })));
+          setLandmarks((best.keypoints ?? []).map((kp, idx) => {
+            const labels = ["rightEye", "leftEye", "noseTip", "mouthCenter", "rightEar", "leftEar"];
+            return {
+              name: labels[idx] || kp.label || "unknown",
+              x: kp.x,
+              y: kp.y,
+            };
+          }));
         }
       } else {
         setFaceBox(null);

@@ -27,11 +27,6 @@ function App() {
     return () => window.removeEventListener("popstate", onPopState)
   }, [])
 
-  const navigate = (route: string) => {
-    window.history.pushState({}, "", route)
-    setActiveRoute(getRouteFromPath(route))
-  }
-
   if (!activeRoute) {
     window.history.replaceState({}, "", "/student")
     return null
