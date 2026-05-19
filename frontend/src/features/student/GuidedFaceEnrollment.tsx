@@ -1,47 +1,56 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { 
-  Camera, 
-  CheckCircle2, 
-  AlertCircle, 
-  Loader2, 
-  ScanFace,
-  Play,
-  UserCheck,
-  Zap
-} from "lucide-react";
+import { Camera, CheckCircle2, Loader2, Play } from "lucide-react"
 import { useNativeCamera } from "../../hooks/useNativeCamera";
+import { CameraErrorView } from "../../components/ui/CameraErrorView";
 import { useFaceDetection } from "../../hooks/useFaceDetection";
 import { 
   getFacePosition, 
   createStabilityState, 
   updateStability,
-  STABILITY_MS,
   type FacePositionLabel,
   type StabilityState,
 } from "../../lib/facePosition";
 
+interface CombinedRegister {
+  sessionId: number
+  name: string
+  email: string
+}
+
 interface GuidedFaceEnrollmentProps {
-  studentId: string;
-  onComplete: () => void;
-  onError: (message: string) => void;
+  /** Used with `/enroll-face` when the student already exists. */
+  studentId?: string
+  /** When set, POST `/register` with session_id + images instead of enroll-face. */
+  combined?: CombinedRegister
+  onComplete: (summary?: { course_name?: string; session_number?: number; student_name?: string; student_id?: number }) => void
+  onError: (message: string) => void
 }
 
 const STEPS = [
-  { target: "center" as const, instruction: "Look straight at the camera", assistant: "Hold steady..." },
-  { target: "right" as const, instruction: "Turn your face to the right", assistant: "Almost there, a bit more..." },
-  { target: "left" as const, instruction: "Turn your face to the left", assistant: "Perfect, hold it!" },
+  { target: "center" as const, instruction: "Look straight", assistant: "Hold steady..." },
+  { target: "left" as const, instruction: "Look left", assistant: "Hold it..." },
+  { target: "right" as const, instruction: "Look right", assistant: "Almost there..." },
+  { target: "up" as const, instruction: "Look up", assistant: "Excellent..." },
+  { target: "center" as const, instruction: "Look straight one more time", assistant: "Final shot!" },
 ];
 
-export function GuidedFaceEnrollment({ studentId, onComplete, onError }: GuidedFaceEnrollmentProps) {
+const HOLD_DURATION_MS = 1500;
+const STEP_DELAY_MS = 2000;
+const ENROLLMENT_TIMEOUT_MS = 120000;
+
+export function GuidedFaceEnrollment({ studentId, combined, onComplete, onError }: GuidedFaceEnrollmentProps) {
   // --- STATE ---
   const [stepIndex, setStepIndex] = useState(0);
   const [capturedFrames, setCapturedFrames] = useState<string[]>([]);
   const [stabilityState, setStabilityState] = useState<StabilityState>(createStabilityState());
   const [enrollmentPhase, setEnrollmentPhase] = useState<"detecting" | "capturing" | "enrolling" | "done" | "error">("detecting");
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [captureError, setCaptureError] = useState<string | null>(null);
   const [showFlash, setShowFlash] = useState(false);
   const [lastPosition, setLastPosition] = useState<FacePositionLabel>("not_detected");
   const [debugText, setDebugText] = useState<string>("");
+  const [isTransitioning, setIsTransitioning] = useState(false);
+  const completeTimerRef = useRef<number | null>(null);
   
   // States
   const [manualMode, setManualMode] = useState(false);
@@ -50,14 +59,17 @@ export function GuidedFaceEnrollment({ studentId, onComplete, onError }: GuidedF
   // --- REFS ---
   const videoRef = useRef<HTMLVideoElement>(null);
   const captureLockRef = useRef(false);
+  const stabilityRef = useRef<StabilityState>(stabilityState);
 
   // --- CAMERA & DETECTION ---
   const { 
-    error: cameraError, 
+    error: cameraError,
+    errorName: cameraErrorName,
     isReady, 
     isActive,
     captureFrame,
-    resume: resumeCamera
+    resume: resumeCamera,
+    switchFacing
   } = useNativeCamera(videoRef, { facingMode: "user", muted: true });
 
   const { 
@@ -66,16 +78,31 @@ export function GuidedFaceEnrollment({ studentId, onComplete, onError }: GuidedF
     isModelLoading,
     isModelReady,
     timedOut,
+    error: detectionError,
   } = useFaceDetection(videoRef, isReady && enrollmentPhase === "detecting" && !manualMode);
+
+  const resetStability = useCallback(() => {
+    const next = createStabilityState();
+    stabilityRef.current = next;
+    setStabilityState(next);
+  }, []);
 
   // Handle detection timeout
   useEffect(() => {
     if (timedOut && !manualMode) setManualMode(true);
   }, [timedOut, manualMode]);
 
+  useEffect(() => {
+    return () => {
+      if (completeTimerRef.current) {
+        window.clearTimeout(completeTimerRef.current)
+      }
+    }
+  }, [])
+
   // Handle Black Screen
   useEffect(() => {
-    let timer: NodeJS.Timeout;
+    let timer: ReturnType<typeof setTimeout>
     if (isReady && !isActive) {
       timer = setTimeout(() => setIsBlackScreen(true), 3000);
     } else if (isActive) {
@@ -85,12 +112,30 @@ export function GuidedFaceEnrollment({ studentId, onComplete, onError }: GuidedF
   }, [isReady, isActive]);
 
   // --- CAPTURE LOGIC ---
+  const scheduleCompletion = useCallback(
+    (summary?: { course_name?: string; session_number?: number; student_name?: string; student_id?: number }) => {
+      if (completeTimerRef.current) {
+        window.clearTimeout(completeTimerRef.current)
+      }
+      setEnrollmentPhase("done")
+      completeTimerRef.current = window.setTimeout(() => {
+        onComplete(summary)
+      }, 800)
+    },
+    [onComplete],
+  )
+
   const handleCapture = useCallback(async () => {
     if (captureLockRef.current) return;
     captureLockRef.current = true;
+    setCaptureError(null);
 
     const frame = captureFrame();
     if (!frame) {
+      const message = "Unable to capture a valid image. Make sure your camera is active and try again.";
+      setCaptureError(message);
+      onError(message);
+      setEnrollmentPhase("detecting");
       captureLockRef.current = false;
       return;
     }
@@ -100,67 +145,118 @@ export function GuidedFaceEnrollment({ studentId, onComplete, onError }: GuidedF
     setShowFlash(true);
     setTimeout(() => setShowFlash(false), 200);
     
-    if (updatedFrames.length < 3) {
+    if (updatedFrames.length < STEPS.length) {
       setFeedback("✓ Step Complete");
+      setIsTransitioning(true);
       setTimeout(() => {
         setStepIndex(prev => prev + 1);
-        setStabilityState(createStabilityState());
+        resetStability();
         setFeedback(null);
         setEnrollmentPhase("detecting");
         captureLockRef.current = false;
-      }, 600);
+        setIsTransitioning(false);
+      }, STEP_DELAY_MS);
     } else {
       setEnrollmentPhase("enrolling");
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), ENROLLMENT_TIMEOUT_MS);
       try {
-        const res = await fetch(`/api/students/${studentId}/enroll-face`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ images: updatedFrames }),
-        });
-        
-        const data = await res.json().catch(() => ({}));
-
-        if (!res.ok) {
-          throw new Error(data.detail || "Enrollment failed");
+        let res: Response
+        let data: any
+        if (combined) {
+          res = await fetch(`/api/students/register`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: combined.name.trim(),
+              email: combined.email.trim(),
+              session_id: combined.sessionId,
+              images: updatedFrames,
+            }),
+            signal: controller.signal,
+          })
+          data = await res.json().catch(() => ({}))
+          if (!res.ok) {
+            const detail = typeof data.detail === "string" ? data.detail : "Registration failed"
+            throw new Error(detail)
+          }
+          scheduleCompletion({
+            course_name: data.course_name ?? undefined,
+            session_number: data.session_number ?? undefined,
+            student_name: data.name ?? undefined,
+            student_id: data.id ?? undefined,
+          })
+        } else {
+          if (!studentId) {
+            throw new Error("Missing student account for enrollment")
+          }
+          res = await fetch(`/api/students/${studentId}/enroll-face`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ images: updatedFrames }),
+            signal: controller.signal,
+          })
+          data = await res.json().catch(() => ({}))
+          if (!res.ok) {
+            throw new Error(data.detail || "Enrollment failed")
+          }
+          scheduleCompletion({ 
+            student_id: data.student_id ?? (studentId ? Number(studentId) : undefined),
+          })
         }
-
-        setEnrollmentPhase("done");
-        setTimeout(onComplete, 1500);
-      } catch (err: any) {
-        setEnrollmentPhase("error");
-        onError(err.message);
+      } catch (err: unknown) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          onError("Enrollment timed out. Please try again.")
+        } else {
+          onError(err instanceof Error ? err.message : "Enrollment failed")
+        }
+        setEnrollmentPhase("error")
       } finally {
-        captureLockRef.current = false;
+        window.clearTimeout(timeoutId)
+        captureLockRef.current = false
       }
     }
-  }, [captureFrame, capturedFrames, studentId, onComplete, onError]);
+  }, [captureFrame, capturedFrames, studentId, combined, onComplete, onError, scheduleCompletion])
 
   // Detection Loop
   useEffect(() => {
-    if (manualMode || enrollmentPhase !== "detecting" || !isReady || !isModelReady || captureLockRef.current) return;
+    if (manualMode || enrollmentPhase !== "detecting" || !isReady || !isModelReady || captureLockRef.current || isTransitioning) return;
 
     if (faceBox) {
       const currentStep = STEPS[stepIndex];
-      const result = getFacePosition(faceBox, landmarks, currentStep.target, stabilityState);
-      const newState = updateStability(stabilityState, result.position, currentStep.target);
+      const currentStability = stabilityRef.current;
+      const result = getFacePosition(faceBox, landmarks, currentStep.target, currentStability);
+      const newState = updateStability(currentStability, result.position, currentStep.target);
+      stabilityRef.current = newState;
       
-      setStabilityState(newState);
-      setLastPosition(result.position);
-      setDebugText(result.debug || "");
+      // Keep the detector loop in refs; mirror only meaningful UI changes into React state.
+      setStabilityState((prev) =>
+        prev.lastPosition === newState.lastPosition && prev.matchingSince === newState.matchingSince
+          ? prev
+          : newState,
+      );
+      setLastPosition((prev) => (prev === result.position ? prev : result.position));
+      setDebugText((prev) => (prev === (result.debug || "") ? prev : result.debug || ""));
 
-      const isStableNow = newState.matchingSince !== null && (Date.now() - newState.matchingSince) >= STABILITY_MS;
+      const isStableNow = newState.matchingSince !== null && (Date.now() - newState.matchingSince) >= HOLD_DURATION_MS;
       if (isStableNow && result.position === currentStep.target) {
         setEnrollmentPhase("capturing");
         handleCapture();
       }
     } else {
-      setLastPosition("not_detected");
-      setDebugText("No face detected");
+      setLastPosition((prev) => (prev === "not_detected" ? prev : "not_detected"));
+      setDebugText((prev) => (prev === "No face detected" ? prev : "No face detected"));
     }
-  }, [enrollmentPhase, faceBox, landmarks, isReady, isModelReady, stepIndex, stabilityState, handleCapture, manualMode]);
+    // We remove stabilityState from deps to avoid the infinite loop, 
+    // it will still run because faceBox/landmarks/stepIndex update on every frame/step.
+  }, [enrollmentPhase, faceBox, landmarks, isReady, isModelReady, stepIndex, handleCapture, manualMode]);
 
   // --- RENDER ---
   const isInitializing = (!isReady || isModelLoading) && !manualMode && !cameraError;
+
+  if (cameraErrorName) {
+    return <CameraErrorView errorName={cameraErrorName} sessionId={combined?.sessionId} onRetry={() => switchFacing("user")} />
+  }
 
   return (
     <div 
@@ -198,6 +294,15 @@ export function GuidedFaceEnrollment({ studentId, onComplete, onError }: GuidedF
         </div>
       )}
 
+      {!isInitializing && !manualMode && enrollmentPhase === "detecting" && !faceBox && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-40">
+          <div className="w-64 h-64 rounded-[34px] border-2 border-dashed border-white/60 bg-white/5 backdrop-blur-sm flex flex-col items-center justify-center text-center px-4">
+            <p className="text-sm uppercase tracking-[0.3em] text-white/80">Align your face</p>
+            <p className="mt-2 text-[11px] leading-snug text-white/60">A detection box will appear once your face is in view.</p>
+          </div>
+        </div>
+      )}
+
       {/* Header Info */}
       <div className="absolute top-0 w-full p-6 flex justify-between items-start z-50">
         <div className="bg-black/60 backdrop-blur-md p-3 rounded-2xl border border-white/10 flex items-center gap-3">
@@ -207,12 +312,8 @@ export function GuidedFaceEnrollment({ studentId, onComplete, onError }: GuidedF
           <div>
             <p className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Enrolling</p>
             <p className="text-sm font-bold">Face Entry</p>
+            <p className="text-[10px] uppercase text-white/60">Step {stepIndex + 1} of {STEPS.length}</p>
           </div>
-        </div>
-        
-        {/* Step Progress Dots */}
-        <div className="flex gap-2 p-4">
-          {[0,1,2].map(i => <div key={i} className={`w-3 h-3 rounded-full ${i <= stepIndex ? 'bg-blue-500 shadow-[0_0_10px_#3b82f6]' : 'bg-white/20'}`} />)}
         </div>
       </div>
 
@@ -223,37 +324,62 @@ export function GuidedFaceEnrollment({ studentId, onComplete, onError }: GuidedF
           <div className="text-center mb-8">
             <h2 className="text-2xl font-black mb-1">{feedback || STEPS[stepIndex].instruction}</h2>
             <p className="text-slate-400 text-sm">{lastPosition === STEPS[stepIndex].target ? "Hold still..." : "Position your face in the center"}</p>
+            {captureError ? (
+              <p className="mt-2 text-sm font-semibold text-amber-200">{captureError}</p>
+            ) : null}
+            {detectionError ? (
+              <p className="mt-2 text-sm font-semibold text-amber-200">{detectionError}</p>
+            ) : null}
             {/* Debug info (Hidden logic) */}
             <p className="text-[8px] text-white/20 mt-2 font-mono">{debugText}</p>
-          </div>
+          </div>          <div className="flex flex-col items-center gap-6">
+             {/* MAIN CAPTURE TRIGGER */}
+             <div className="relative">
+                {/* SVG Progress Ring */}
+                {stabilityState.matchingSince && !isTransitioning && !manualMode && (
+                  <svg className="absolute -inset-4 size-32 -rotate-90">
+                    <circle
+                      cx="64"
+                      cy="64"
+                      r="60"
+                      fill="transparent"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                      className="text-white/10"
+                    />
+                    <circle
+                      cx="64"
+                      cy="64"
+                      r="60"
+                      fill="transparent"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                      strokeDasharray={377}
+                      strokeDashoffset={377 - (377 * Math.min(100, (Date.now() - (stabilityState.matchingSince || 0)) / HOLD_DURATION_MS * 100)) / 100}
+                      className="text-blue-500 transition-all duration-100"
+                    />
+                  </svg>
+                )}
+                
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleCapture(); }}
+                  className={`group relative w-24 h-24 bg-white rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(255,255,255,0.3)] active:scale-95 transition-all ${(!isReady || !isActive || isTransitioning) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  disabled={!isReady || !isActive || isTransitioning}
+                >
+                  <div className="w-16 h-16 border-4 border-slate-950 rounded-full flex items-center justify-center">
+                    <Camera className="text-black w-8 h-8" />
+                  </div>
+                </button>
+             </div>
 
-          <div className="flex items-center gap-10">
-             {/* Fallback Switch */}
              <button 
                 onClick={(e) => { e.stopPropagation(); setManualMode(!manualMode); }}
-                className="w-12 h-12 bg-white/10 rounded-full flex items-center justify-center border border-white/20"
+                className="text-[11px] font-bold text-slate-500 underline underline-offset-4 hover:text-white transition-colors"
                 title="Toggle Mode"
              >
-                <Zap className={`w-5 h-5 ${manualMode ? 'text-amber-400' : 'text-slate-400'}`} />
+                Having trouble? Tap to capture manually
              </button>
-
-             {/* MAIN CAPTURE TRIGGER */}
-             <button
-                onClick={(e) => { e.stopPropagation(); handleCapture(); }}
-                className="group relative w-24 h-24 bg-white rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(255,255,255,0.3)] active:scale-95 transition-all"
-             >
-                <div className="absolute inset-[-4px] border-2 border-blue-500 rounded-full animate-ping opacity-20" />
-                <div className="w-20 h-20 border-4 border-slate-950 rounded-full flex items-center justify-center">
-                  <Camera className="text-black w-10 h-10" />
-                </div>
-             </button>
-
-             <div className="w-12" /> {/* Spacer */}
           </div>
-          
-          <p className="mt-6 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-            {manualMode ? "Manual Capture Active" : "Auto-Detection Active"}
-          </p>
         </div>
       )}
 
@@ -277,7 +403,11 @@ export function GuidedFaceEnrollment({ studentId, onComplete, onError }: GuidedF
       {(enrollmentPhase === "enrolling" || enrollmentPhase === "done") && (
         <div className={`absolute inset-0 flex flex-col items-center justify-center z-[150] ${enrollmentPhase === 'done' ? 'bg-emerald-600' : 'bg-slate-950/98'}`}>
           {enrollmentPhase === "enrolling" ? (
-             <><Loader2 className="w-16 h-16 text-blue-500 animate-spin mb-6" /><p className="text-2xl font-black italic">PROCESSING...</p></>
+            <>
+              <Loader2 className="w-16 h-16 text-blue-500 animate-spin mb-6" />
+              <p className="text-2xl font-black italic">PROCESSING...</p>
+              <p className="mt-3 text-sm uppercase text-white/70">Finalizing enrollment: {capturedFrames.length} / {STEPS.length} images</p>
+            </>
           ) : (
              <><CheckCircle2 className="w-24 h-24 text-white mb-6 animate-bounce" /><h2 className="text-5xl font-black italic">SUCCESS</h2></>
           )}

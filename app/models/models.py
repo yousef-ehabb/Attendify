@@ -9,11 +9,25 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     UniqueConstraint,
-    Index,
 )
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
+
+
+class Course(Base):
+    __tablename__ = "courses"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False)
+    code = Column(String, unique=True, nullable=False, index=True)
+    instructor_name = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    sessions = relationship("Session", back_populates="course", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<Course(id={self.id}, code='{self.code}', name='{self.name}')>"
 
 
 class Student(Base):
@@ -35,16 +49,17 @@ class Session(Base):
     __tablename__ = "sessions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    course_name = Column(String, nullable=False)
-    instructor = Column(String, nullable=False)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False, index=True)
     started_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    ended_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True)
 
-    qr_tokens = relationship("QRToken", back_populates="session")
-    attendances = relationship("Attendance", back_populates="session")
+    course = relationship("Course", back_populates="sessions")
+    qr_tokens = relationship("QRToken", back_populates="session", cascade="all, delete-orphan")
+    attendances = relationship("Attendance", back_populates="session", cascade="all, delete-orphan")
 
     def __repr__(self):
-        return f"<Session(id={self.id}, course='{self.course_name}', active={self.is_active})>"
+        return f"<Session(id={self.id}, course_id={self.course_id}, active={self.is_active})>"
 
 
 class QRToken(Base):

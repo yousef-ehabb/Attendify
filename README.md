@@ -19,6 +19,10 @@ Built as a hybrid system with a robust Python/FastAPI backend and a responsive R
 *   **Backend**: Python, FastAPI, SQLAlchemy, SQLite (Development), face_recognition (dlib)
 *   **Deployment**: Docker, Docker Compose
 
+## V2 database note (breaking change from V1)
+
+Attendify V2 introduces a `courses` table and links every `sessions` row to a course via `course_id`. Existing SQLite files from V1 are **not** migrated automatically. On first run after upgrading to V2, delete your local database file (for example `data/attendance.db`) and let the app recreate tables on startup, or run `Base.metadata.drop_all()` / `create_all()` in a dev shell. V1 data is discarded in that process.
+
 ## Quick Start
 
 ### Prerequisites
@@ -62,8 +66,12 @@ Built as a hybrid system with a robust Python/FastAPI backend and a responsive R
 
 2.  Start the FastAPI server:
     ```bash
-    uvicorn main:app --reload --port 8000
+    uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
     ```
+
+### Production Notes
+
+The `--workers 4` flag enables true parallelism for CPU-bound face recognition requests. Without it, simultaneous scans from multiple students will queue behind each other and may timeout.
 
 #### Frontend Setup
 

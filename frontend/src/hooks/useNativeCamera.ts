@@ -10,6 +10,7 @@ export interface UseNativeCameraOptions {
 
 export interface UseNativeCameraReturn {
   error: string | null;
+  errorName: string | null;
   isReady: boolean;
   isActive: boolean;
   stop: () => void;
@@ -22,21 +23,19 @@ export function useNativeCamera(
   videoRef: React.RefObject<HTMLVideoElement | null>,
   options: UseNativeCameraOptions = {},
 ): UseNativeCameraReturn {
-  const {
-    facingMode = "user",
-    autoPlay = true,
-    muted = true,
-  } = options;
+  const { facingMode = "user", muted = true } = options
 
   const streamRef = useRef<MediaStream | null>(null);
   const facingRef = useRef<FacingMode>(facingMode);
   const activeRef = useRef(false);
 
   const [error, setError] = useState<string | null>(null);
+  const [errorName, setErrorName] = useState<string | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [isActive, setIsActive] = useState(false);
 
   const start = async (mode: FacingMode) => {
+    // ... rest up to try block
     facingRef.current = mode;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
@@ -46,6 +45,7 @@ export function useNativeCamera(
     setIsReady(false);
     setIsActive(false);
     setError(null);
+    setErrorName(null);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -104,6 +104,7 @@ export function useNativeCamera(
                   err.name === "NotReadableError" ? "Camera is already in use." :
                   `Camera error: ${err.message}`;
       setError(msg);
+      setErrorName(err.name || "UnknownError");
       setIsReady(false);
     }
   };
@@ -148,15 +149,26 @@ export function useNativeCamera(
 
   const captureFrame = (): string | null => {
     const video = videoRef.current;
-    if (!video || video.readyState < 2 || video.videoWidth === 0) return null;
+    if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return null;
+
+    const MAX_CAPTURE_WIDTH = 640;
+    const MAX_CAPTURE_HEIGHT = 480;
+    const scale = Math.min(
+      MAX_CAPTURE_WIDTH / video.videoWidth,
+      MAX_CAPTURE_HEIGHT / video.videoHeight,
+      1,
+    );
+
+    const width = Math.round(video.videoWidth * scale);
+    const height = Math.round(video.videoHeight * scale);
     const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    canvas.width = width;
+    canvas.height = height;
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
-    ctx.drawImage(video, 0, 0);
-    return canvas.toDataURL("image/jpeg", 0.9);
+    ctx.drawImage(video, 0, 0, width, height);
+    return canvas.toDataURL("image/jpeg", 0.75);
   };
 
-  return { error, isReady, isActive, stop, switchFacing, captureFrame, resume };
+  return { error, errorName, isReady, isActive, stop, switchFacing, captureFrame, resume };
 }

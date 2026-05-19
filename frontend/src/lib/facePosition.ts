@@ -101,38 +101,37 @@ export function getFacePosition(
     return { position: "too_far", isStable: false, confidence: 0, debug: "Come closer" };
   }
   
-  const noseLandmark = landmarks.find(l => l.name === "noseTip");
-  let offsetX = 0;
-  let offsetY = 0;
-  
-  if (noseLandmark) {
-    offsetX = noseLandmark.x - 0.5;
-    offsetY = noseLandmark.y - 0.5;
-  } else {
-    offsetX = (faceBox.x + faceBox.width / 2) - 0.5;
-    offsetY = (faceBox.y + faceBox.height / 2) - 0.5;
-  }
-  
-  const aspectRatio = faceBox.width / faceBox.height;
-  const isCenteredHorizontally = Math.abs(offsetX) < NOSE_CENTER_THRESHOLD;
-  const isCenteredVertically = Math.abs(offsetY) < VERTICAL_THRESHOLD;
-  const isFrontal = aspectRatio >= FRONTAL_RATIO_MIN;
-  
-  let position: FacePositionLabel;
-  let debugMsg = `X:${offsetX.toFixed(2)} Y:${offsetY.toFixed(2)} AR:${aspectRatio.toFixed(2)}`;
+  const nose = landmarks.find(l => l.name === "noseTip");
+  const leftEye = landmarks.find(l => l.name === "leftEye");
+  const rightEye = landmarks.find(l => l.name === "rightEye");
 
-  if (isCenteredHorizontally && isCenteredVertically && isFrontal) {
-    position = "center";
-  } else if (offsetX < -NOSE_TURN_THRESHOLD) {
-    position = "right";
-  } else if (offsetX > NOSE_TURN_THRESHOLD) {
+  if (!nose || !leftEye || !rightEye) {
+    return { position: "not_detected", isStable: false, confidence: 0, debug: "Missing landmarks" };
+  }
+
+  // DETAILED LOGGING (TEMPORARY)
+  console.log(`[PoseDetection] Nose:(${nose.x.toFixed(3)}, ${nose.y.toFixed(3)}) L-Eye:(${leftEye.x.toFixed(3)}, ${leftEye.y.toFixed(3)}) R-Eye:(${rightEye.x.toFixed(3)}, ${rightEye.y.toFixed(3)})`);
+
+  const threshold = 0.05;
+  const centerThreshold = 0.03;
+  const midpointX = (leftEye.x + rightEye.x) / 2;
+
+  let position: FacePositionLabel = "center";
+  
+  if (nose.x < leftEye.x - threshold) {
     position = "left";
-  } else if (offsetY < -VERTICAL_THRESHOLD) {
+  } else if (nose.x > rightEye.x + threshold) {
+    position = "right";
+  } else if (nose.y < leftEye.y - threshold) {
     position = "up";
+  } else if (Math.abs(nose.x - midpointX) < centerThreshold) {
+    position = "center";
   } else {
-    position = "center"; // Default to center if close enough
+    position = "center"; // Default
   }
   
+  const debugMsg = `P:${position} NX:${nose.x.toFixed(2)} LX:${leftEye.x.toFixed(2)} RX:${rightEye.x.toFixed(2)}`;
+
   const newStability = updateStability(stability, position, targetPosition, currentTime);
   const isStable = newStability.matchingSince !== null && (currentTime - newStability.matchingSince) >= STABILITY_MS;
   
@@ -145,8 +144,8 @@ export function getFacePosition(
 }
 
 export function checkFrameQuality(
-  imageData: ImageData,
-  detectionConfidence: number,
+  _imageData: ImageData,
+  _detectionConfidence: number,
 ): QualityResult {
   return { pass: true }; // Totally unrestricted for fallback
 }

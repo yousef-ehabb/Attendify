@@ -37,6 +37,34 @@ def _decode_base64_to_rgb(base64_str: str) -> np.ndarray:
     return np.array(image)
 
 
+def _find_face_locations(rgb_image: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """
+    Try multiple face detection fallbacks for better enrollment reliability.
+
+    Uses HOG first for speed, then an upsampled HOG pass, and finally CNN
+    only if the other options fail. This improves robustness on varied
+    lighting and off-angle captures.
+    """
+    face_locations = face_recognition.face_locations(rgb_image, model="hog")
+    if face_locations:
+        return face_locations
+
+    face_locations = face_recognition.face_locations(
+        rgb_image,
+        number_of_times_to_upsample=1,
+        model="hog",
+    )
+    if face_locations:
+        return face_locations
+
+    try:
+        face_locations = face_recognition.face_locations(rgb_image, model="cnn")
+    except Exception:
+        face_locations = []
+
+    return face_locations
+
+
 def encode_faces(base64_images: list[str]) -> bytes:
     """
     Process 3-5 face images and return a single averaged encoding
@@ -54,16 +82,12 @@ def encode_faces(base64_images: list[str]) -> bytes:
     for i, b64 in enumerate(base64_images):
         rgb_image = _decode_base64_to_rgb(b64)
         
-        # Try fast HOG model first
-        face_locations = face_recognition.face_locations(rgb_image, model="hog")
-        
-        # If HOG fails (often happens with side profiles), try the more robust but slower CNN model
-        # Upsampling (number_of_times_to_upsample=1) also helps with smaller/distant faces
-        if len(face_locations) == 0:
-            face_locations = face_recognition.face_locations(rgb_image, number_of_times_to_upsample=1, model="cnn")
+        face_locations = _find_face_locations(rgb_image)
 
         if len(face_locations) == 0:
-            raise ValueError(f"Face not clear in Photo {i + 1}. Please ensure your whole face is visible and look slightly more towards the camera.")
+            raise ValueError(
+                f"Face not clear in Photo {i + 1}. Please ensure your whole face is visible and look slightly more towards the camera."
+            )
         
         if len(face_locations) > 1:
             raise ValueError(
@@ -72,7 +96,7 @@ def encode_faces(base64_images: list[str]) -> bytes:
             )
 
         # face_encodings returns a list; we know there's exactly 1 face
-        encoding = face_recognition.face_encodings(rgb_image, face_locations, num_jitters=2)[0]
+        encoding = face_recognition.face_encodings(rgb_image, face_locations, num_jitters=0)[0]
         encodings.append(encoding)
 
     if not encodings:
@@ -112,7 +136,7 @@ def compare_face(
 
     # Encode the new image
     rgb_image = _decode_base64_to_rgb(base64_image)
-    face_locations = face_recognition.face_locations(rgb_image, model="hog")
+    face_locations = _find_face_locations(rgb_image)
 
     if len(face_locations) == 0:
         raise ValueError("No face detected in the verification image")
@@ -127,3 +151,27 @@ def compare_face(
     is_match = distance <= tolerance
 
     return is_match, distance
+
+
+def encode_single_face(base64_image: str) -> bytes:
+    """
+    Extract one 128-d face encoding from a single image and return as float64 bytes.
+    """
+    rgb_image = _decode_base64_to_rgb(base64_image)
+    face_locations = _find_face_locations(rgb_image)
+    if len(face_locations) == 0:
+        raise ValueError("No face detected in the image")
+    if len(face_locations) > 1:
+        raise ValueError("Multiple faces detected. Please ensure you are alone in frame.")
+    encoding = face_recognition.face_encodings(rgb_image, face_locations, num_jitters=0)[0]
+    return encoding.astype(np.float64).tobytes()
+
+
+def merge_face_encoding(stored_blob: bytes, base64_image: str) -> bytes:
+    """
+    Average the stored encoding with a new face capture (for instructor-led learning).
+    """
+    stored = np.frombuffer(stored_blob, dtype=np.float64)
+    new_vec = np.frombuffer(encode_single_face(base64_image), dtype=np.float64)
+    merged = (stored + new_vec) / 2.0
+    return merged.astype(np.float64).tobytes()

@@ -85,6 +85,72 @@ export interface SessionResponse {
   is_active: boolean
 }
 
+export interface CourseCreateInput {
+  name: string
+  code: string
+  instructor_name: string
+}
+
+export interface CourseResponse {
+  id: number
+  name: string
+  code: string
+  instructor_name: string
+  student_count: number
+  session_count: number
+  created_at: string
+}
+
+export interface CourseDetailSessionItem {
+  id: number
+  session_number: number
+  started_at: string
+  is_active: boolean
+  present_count: number
+}
+
+export interface CourseDetailResponse {
+  id: number
+  name: string
+  code: string
+  instructor_name: string
+  created_at: string
+  student_count: number
+  session_count: number
+  sessions: CourseDetailSessionItem[]
+}
+
+export interface CourseStudentStats {
+  student_id: number
+  name: string
+  email: string
+  sessions_attended: number
+  total_sessions: number
+  attendance_rate: number
+  consecutive_misses: number
+}
+
+export interface RecapPerson {
+  student_id: number
+  name: string
+  email: string
+  verified_at: string | null
+}
+
+export interface SessionRecapResponse {
+  session_id: number
+  course_id: number
+  session_number: number
+  started_at: string
+  ended_at: string | null
+  duration_minutes: number | null
+  present_count: number
+  absent_count: number
+  attendance_percentage: number
+  present_list: RecapPerson[]
+  absent_list: RecapPerson[]
+}
+
 export interface AttendanceRecord {
   student_id: number
   student_name: string
@@ -105,18 +171,24 @@ export interface QrVerifyResponse {
 }
 
 export interface FaceVerifyInput {
-  session_id: number
+  token: string
   student_id: number
   image: string
 }
 
-export interface FaceVerifyResponse {
-  message: string
-  session_id: number
-  student_id: number
-  verified_at: string
-  distance?: number
-}
+/** Discriminated by `status` (V2). */
+export type FaceVerifyResponse =
+  | {
+      status: "recognized"
+      student_name: string
+      course_name: string
+      session_number: number
+      session_id: number
+      student_id: number
+      verified_at: string
+      distance: number
+    }
+  | { status: "unknown"; distance?: number | null }
 
 export interface AttendanceStatusResponse {
   session_id: number
@@ -281,6 +353,20 @@ export const studentsApi = {
   bulkDelete: () => api.post<{ message: string }, undefined>("/api/students/bulk-wipe"),
 }
 
+export const coursesApi = {
+  list: () => api.get<CourseResponse[]>("/api/courses"),
+  get: (courseId: number) =>
+    api.get<CourseDetailResponse>(`/api/courses/${courseId}`),
+  create: (payload: CourseCreateInput) =>
+    api.post<CourseResponse, CourseCreateInput>("/api/courses", payload),
+  startSession: (courseId: number) =>
+    api.post<SessionResponse, undefined>(`/api/courses/${courseId}/sessions`),
+  listStudents: (courseId: number) =>
+    api.get<CourseStudentStats[]>(`/api/courses/${courseId}/students`),
+  exportUrl: (courseId: number) => `/api/courses/${courseId}/export`,
+  delete: (courseId: number) => api.delete<{ message: string }>(`/api/courses/${courseId}`),
+}
+
 export const sessionsApi = {
   list: () => api.get<SessionResponse[]>("/api/sessions/"),
   start: (payload: SessionCreateInput) =>
@@ -289,8 +375,21 @@ export const sessionsApi = {
     api.post<{ message: string }, undefined>(`/api/sessions/${sessionId}/end`),
   listAttendance: (sessionId: number) =>
     api.get<AttendanceRecord[]>(`/api/sessions/${sessionId}/attendance`),
+  listPendingCheckins: (sessionId: number) =>
+    api.get<string[]>(`/api/sessions/${sessionId}/pending-checkins`),
+  recap: (sessionId: number) =>
+    api.get<SessionRecapResponse>(`/api/sessions/${sessionId}/recap`),
+  manualAttendance: (sessionId: number, payload: { student_id?: number; student_name?: string }) =>
+    api.post<
+      { message: string; session_id: number; student_id: number; verified_at: string },
+      { student_id?: number; student_name?: string }
+    >(`/api/sessions/${sessionId}/manual-attendance`, payload),
   qrUrl: (sessionId: number, refresh = false) =>
     `/api/sessions/${sessionId}/qr${refresh ? "/refresh" : ""}?ts=${Date.now()}`,
+  exportAttendanceUrl: (sessionId: number) =>
+    `/api/sessions/${sessionId}/attendance/export`,
+  removeAttendance: (sessionId: number, studentId: number) =>
+    api.delete<{ message: string }>(`/api/sessions/${sessionId}/attendance/${studentId}`),
 }
 
 export const attendanceApi = {
