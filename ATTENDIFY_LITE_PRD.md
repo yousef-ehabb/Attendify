@@ -1,74 +1,97 @@
 # Attendify Lite: Master System Specification & Design System
 **Project Codename**: Attendify Lite  
-**Document Version**: 2.2.0  
+**Document Version**: 2.3.0  
 **Target Architecture**: React 19 (Vite) + FastAPI (Python 3.10+) + Supabase PostgreSQL  
 
 ---
 
 ## 1. Executive Overview & Design Philosophy
 
-**Attendify Lite** is a high-performance, mobile-first classroom management and attendance tracking platform. It replaces heavy machine learning / facial recognition dependencies with cryptographically signed, rotating QR codes paired with role-based user accounts and dynamic instructor-anchored geofencing.
+**Attendify Lite** is a high-performance, mobile-first classroom management and attendance tracking platform. It replaces heavy machine learning / facial recognition dependencies with cryptographically signed, rotating QR codes paired with verified student onboarding and dynamic instructor-anchored geofencing.
 
 ### Key Architectural Tenets:
-1. **Zero-Friction Access**: Students scan and claim attendance in < 3 seconds using any smartphone browser.
-2. **Cryptographic Anti-Spoofing**: Rotating HMAC-SHA256 QR tokens with 15–30 second lifetimes eliminate remote picture/screenshot sharing.
-3. **Dynamic Instructor-Anchored Geofencing**: When starting a session, the instructor's device location becomes the live anchor point ($1\,\text{km}$ default radius).
-4. **Realistic Security Posture**: Clearly defined Threat Model separating off-campus remote sharing prevention from in-room proxy attendance.
-5. **Aesthetic Excellence**: Built with a state-of-the-art dark mode UI, glassmorphism, dynamic animations, and intuitive micro-interactions.
+1. **One-Time Identity Onboarding**: Verified registration collecting Egyptian National ID (validated via 14-digit self-encoding checksum) and Phone OTP.
+2. **Sub-Second Fast-Path Scanning**: After onboarding, daily attendance claims require zero personal data re-entry—just a single tap (Camera + GPS grab).
+3. **PII Protection by Design**: Egyptian National IDs are stored as salted SHA-256 hashes (`national_id_hash`), preventing identity leaks.
+4. **Cryptographic Anti-Spoofing**: Rotating HMAC-SHA256 QR tokens with 15–30 second lifetimes eliminate remote picture/screenshot sharing.
+5. **Dynamic Instructor Geofence Anchor**: When starting a session, the instructor's device location becomes the live anchor point ($1\,\text{km}$ default radius).
 6. **Real-time Synchronization**: WebSockets / Server-Sent Events (SSE) feed live attendee counts directly to classroom projectors without polling.
 7. **100% Free Hosting Ready**: Zero heavy C++ binary requirements—runs seamlessly on Vercel, Netlify, Render, Koyeb, and Supabase.
 
 ---
 
-## 2. Design System & UI Specifications
+## 2. Onboarding & Identity Verification Specification
 
-### 2.1 Color Palette & Tokens
+### 2.1 One-Time Registration Payload & Validation
 
-Attendify Lite uses a modern, deep dark-mode visual aesthetic with high-contrast status colors.
+During registration, students provide their official identity details once:
 
-```css
-:root {
-  /* Brand Primary (Deep Electric Indigo) */
-  --primary: #6366f1;
-  --primary-hover: #4f46e5;
-  --primary-glow: rgba(99, 102, 241, 0.25);
-
-  /* Backgrounds & Surfaces */
-  --bg-app: #090d16;
-  --bg-card: rgba(18, 24, 38, 0.75);
-  --bg-card-hover: rgba(26, 34, 53, 0.85);
-  --bg-input: #111726;
-
-  /* Borders & Dividers */
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-active: rgba(99, 102, 241, 0.5);
-
-  /* Functional Status Colors */
-  --status-present: #10b981;     /* Emerald Green (Marked Present) */
-  --status-late: #f59e0b;        /* Amber Gold (Late Join) */
-  --status-absent: #ef4444;      /* Rose Red (Absent) */
-  --status-info: #3b82f6;        /* Sky Blue (Active Session) */
-
-  /* Text Colors */
-  --text-main: #f8fafc;
-  --text-muted: #94a3b8;
-  --text-subtle: #64748b;
+```json
+POST /api/auth/register
+{
+  "full_name_ar": "أحمد محمد علي",
+  "email": "ahmed.ali@compit.aun.edu.eg",
+  "password": "SecurePassword123!",
+  "national_id": "30105151201234",
+  "phone_number": "+201012345678",
+  "role": "STUDENT"
 }
 ```
 
-### 2.2 Typography Hierarchy
+---
 
-* **Primary Font**: `Inter` or `Geist Variable` from Google Fonts.
-* **Monospace Font** (for Join Codes & Tokens): `JetBrains Mono` or `Fira Code`.
+### 2.2 Egyptian National ID Self-Encoding Validation Algorithm
 
-| Level | Size | Weight | Usage |
-| :--- | :--- | :--- | :--- |
-| **Display 1** | `2.5rem (40px)` | Bold (700) | Live QR Session Counter |
-| **Heading 1** | `1.875rem (30px)` | SemiBold (600) | Page Titles, Dashboard Headers |
-| **Heading 2** | `1.5rem (24px)` | Medium (500) | Course Card Titles, Modal Headers |
-| **Body** | `1.0rem (16px)` | Regular (400) | Form Inputs, Roster Tables |
-| **Small / Badge** | `0.875rem (14px)` | Medium (500) | Status Pills, Time Timestamps |
-| **Code / Token** | `1.25rem (20px)` | Monospace (700) | 8-Character Course Join Codes |
+The Egyptian 14-digit National ID self-encodes birth date, century, governorate of birth, and gender. The backend validates this string format prior to hashing:
+
+```python
+import datetime
+
+def validate_egyptian_national_id(nid: str) -> tuple[bool, str]:
+    if len(nid) != 14 or not nid.isdigit():
+        return False, "National ID must be exactly 14 numeric digits"
+    
+    # 1. Century Parsing
+    century_digit = nid[0]
+    if century_digit not in ("2", "3"):
+        return False, "Invalid century indicator"
+    
+    century = 1900 if century_digit == "2" else 2000
+    year = century + int(nid[1:3])
+    month = int(nid[3:5])
+    day = int(nid[5:7])
+    
+    # 2. Date Plausibility Check
+    try:
+        birth_date = datetime.date(year, month, day)
+    except ValueError:
+        return False, "Invalid birth date encoded in National ID"
+    
+    # 3. Student Age Range Verification (17 to 35 years old)
+    today = datetime.date.today()
+    age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+    if not (17 <= age <= 35):
+        return False, f"Age derived from National ID ({age}) is out of university student range"
+    
+    # 4. Governorate Code Verification (01-88 range)
+    gov_code = int(nid[7:9])
+    valid_gov_codes = {1, 2, 3, 4, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 88}
+    if gov_code not in valid_gov_codes:
+        return False, "Invalid governorate code in National ID"
+        
+    return True, "Valid"
+```
+
+---
+
+### 2.3 PII Protection & Hash Storage Strategy
+
+> [!CAUTION]
+> **Data Privacy Mandate**: Plaintext National IDs are sensitive Personally Identifiable Information (PII) in Egypt. **Never store plaintext National IDs** in database columns or log files.
+
+1. **Salted Hash Storage**: Store `national_id_hash = SHA256(national_id + PEPPER_SECRET)` with a `UNIQUE` index in PostgreSQL.
+2. **Uniqueness Check**: Attempts to register a duplicated National ID will be rejected at the database level without exposing student PII.
+3. **Optional AES-256 Encryption**: If official university administration requires plaintext auditing, store in `encrypted_national_id` encrypted at rest using AES-256-GCM.
 
 ---
 
@@ -78,17 +101,21 @@ Attendify Lite uses a modern, deep dark-mode visual aesthetic with high-contrast
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- 1. Users Table
+-- 1. Users Table (Includes Arabic Name, Salted NID Hash, & Phone Verification)
 CREATE TABLE public.users (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
+    full_name_ar VARCHAR(150),                          -- Official Arabic Name
     email VARCHAR(255) NOT NULL UNIQUE,
     hashed_password VARCHAR(255) NOT NULL,
+    national_id_hash VARCHAR(64) UNIQUE,                -- Salted SHA-256 Hash of NID
+    phone_number VARCHAR(20) NOT NULL,                  -- Phone Number (+20...)
+    phone_verified BOOLEAN NOT NULL DEFAULT FALSE,       -- OTP Status
     role VARCHAR(20) NOT NULL CHECK (role IN ('INSTRUCTOR', 'STUDENT')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 2. Revoked / Blacklisted Tokens (JWT Revocation Path)
+-- 2. Revoked Tokens Table (JWT Logout & Revocation)
 CREATE TABLE public.revoked_tokens (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     jti VARCHAR(255) NOT NULL UNIQUE,
@@ -115,7 +142,7 @@ CREATE TABLE public.course_enrollments (
     CONSTRAINT uq_course_student UNIQUE (course_id, student_id)
 );
 
--- 5. Attendance Sessions Table (Includes Dynamic Instructor Geofence Anchor)
+-- 5. Attendance Sessions Table (Dynamic Instructor Geofence Anchor)
 CREATE TABLE public.sessions (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     course_id BIGINT NOT NULL REFERENCES public.courses(id) ON DELETE CASCADE,
@@ -142,8 +169,9 @@ CREATE TABLE public.attendance (
     CONSTRAINT uq_session_student_attendance UNIQUE (session_id, student_id)
 );
 
--- Performance Indexes
+-- Indexes for Fast Querying
 CREATE INDEX idx_users_email ON public.users(email);
+CREATE INDEX idx_users_national_id ON public.users(national_id_hash);
 CREATE INDEX idx_courses_join_code ON public.courses(join_code);
 CREATE INDEX idx_sessions_course ON public.sessions(course_id);
 CREATE INDEX idx_sessions_active ON public.sessions(is_active);
@@ -153,26 +181,35 @@ CREATE INDEX idx_attendance_student ON public.attendance(student_id);
 
 ---
 
-## 4. Cryptographic Engine, Geofencing & Threat Analysis
+## 4. Sub-Second Fast-Path Scanning & Security Architecture
 
-### 4.1 Dynamic Instructor Geofence Anchor Mechanism
+### 4.1 Daily Fast-Path Attendance Claim Workflow
 
-1. **Session Anchor Creation**: When an instructor clicks **"Start Session"**, the frontend captures their device location once via `navigator.geolocation.getCurrentPosition()` and posts `instructor_lat` and `instructor_lng` to `/api/sessions/start`.
-2. **Student Claim Verification**: When a student scans the QR code, the mobile browser captures `student_lat` and `student_lng` and posts them to `/api/attendance/scan`.
-3. **Haversine Distance Formula**:
-   The backend computes distance $d$ in meters between student and instructor:
-   $$\Delta \phi = \text{lat}_2 - \text{lat}_1, \quad \Delta \lambda = \text{lng}_2 - \text{lng}_1$$
-   $$a = \sin^2\left(\frac{\Delta \phi}{2}\right) + \cos(\text{lat}_1)\cos(\text{lat}_2)\sin^2\left(\frac{\Delta \lambda}{2}\right)$$
-   $$d = 2 \cdot R \cdot \arcsin(\sqrt{a}) \quad \text{where } R = 6,371,000 \text{ meters}$$
+Once onboarded, students execute the attendance claim in **under 500 milliseconds**:
 
-If $d > \text{geofence\_radius\_m}$ (default $1000\,\text{m}$), the claim is rejected with `HTTP 403 Forbidden`:
-`{ "detail": "Location too far from session (1420m, max 1000m)" }`
+1. **Student opens mobile app**: Authenticated JWT session is already active.
+2. **Tap "Scan QR Code"**: Camera viewfinder opens and captures current GPS coordinates (`student_lat`, `student_lng`).
+3. **Single POST Payload**:
+   ```json
+   POST /api/attendance/scan
+   Headers: Authorization: Bearer <JWT_TOKEN>
+   {
+     "session_id": 101,
+     "token": "abc123hmac",
+     "lat": 30.0444,
+     "lng": 31.2357
+   }
+   ```
+4. **Backend Instant Checks (< 50ms)**:
+   * Decodes student identity from JWT (`student_id`).
+   * Validates HMAC token signature & time slice.
+   * Calculates Haversine distance against `session.instructor_lat/lng` ($\le 1000\,\text{m}$).
+   * Inserts attendance record (`status = 'PRESENT'` or `'LATE'`).
+5. **Instant UI Feedback**: Screen flashes green, phone vibrates, attendance recorded!
 
 ---
 
-### 4.2 Realistic Threat Model & Security Posture
-
-It is critical to distinguish what this two-factor verification architecture defends against versus its limitations:
+### 4.2 Realistic Threat Model Matrix
 
 ```
 +-----------------------------------------------------------------------------------------+
@@ -180,66 +217,18 @@ It is critical to distinguish what this two-factor verification architecture def
 +-----------------------------------------------------------------------------------------+
 | Threat Vector                  | Mitigated By                | Protection Status        |
 +--------------------------------+-----------------------------+--------------------------+
+| Fake/Duplicate Registration    | 14-Digit Egyptian NID Check | FULLY PREVENTED          |
+| (Student creates fake account) | & Salted Hash Uniqueness    |                          |
++--------------------------------+-----------------------------+--------------------------+
 | Off-Campus Remote QR Sharing   | 1000m Geofence Check        | FULLY PREVENTED          |
 | (Student in another city/dorm) |                             |                          |
 +--------------------------------+-----------------------------+--------------------------+
 | Screenshot Texting             | 15-second Rotating HMAC     | FULLY PREVENTED          |
 | (Student sends photo)          | Token                       |                          |
 +--------------------------------+-----------------------------+--------------------------+
-| In-Class Friend Proxy          | Requires physical attendance| Partially Mitigated      |
-| (Friend scans inside room)     | or phone swap in room       | (Needs ML / Biometrics)  |
+| In-Class Friend Proxy          | Requires physical device or | Partially Mitigated      |
+| (Friend scans inside room)     | account sharing             | (Needs Biometrics/ML)    |
 +--------------------------------+-----------------------------+--------------------------+
-| DevTools Mock Location         | Server Haversine Check      | Raises Barrier for Casual|
-| (Faking GPS in DevTools)       |                             | Cheating                 |
-+--------------------------------+-----------------------------+--------------------------+
-```
-
-> **Why a 1 km (1000m) Default Geofence?**
-> * **Zero Building Setup**: No manual configuration of building lat/long required.
-> * **Eliminates Indoor GPS Jitter**: Concrete walls and indoor attenuation cause $20\text{--}50\,\text{m}$ of GPS error. A $1000\,\text{m}$ boundary eliminates false rejections for legitimate students inside classrooms while guaranteeing off-campus remote sharing is impossible.
-
----
-
-### 4.3 Graceful Location Permission Fallback
-
-If a student's browser blocks location access:
-* **UI Guidance**: The mobile scanner presents an explicit helper modal: `"Location access is required to confirm campus presence. Please enable location permissions in browser settings."`
-* **Optional Instructor Override**: Scans without location payloads can be recorded with `status = 'FLAGGED_UNVERIFIED'` for instructor manual review rather than hard-failing without explanation.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Instructor
-    actor Student
-    participant Frontend
-    participant Backend
-    participant WebSocket
-    participant Database
-
-    Instructor->>Frontend: Click "Start Session" (Fetch Device GPS)
-    Frontend->>Backend: POST /api/sessions/start {course_id, instructor_lat, instructor_lng, geofence_radius_m: 1000}
-    Backend->>Database: Store Session Anchor (30.0444, 31.2357)
-    Backend-->>Frontend: Session Created (ID: 101)
-    
-    Frontend->>WebSocket: Connect WS /ws/sessions/101/live-feed
-    
-    Student->>Frontend: Scan QR Code (Fetch Mobile GPS)
-    Frontend->>Backend: POST /api/attendance/scan {token, session_id, lat: 30.0450, lng: 31.2360}
-    
-    Backend->>Backend: Compute Haversine Distance (d = 95m)
-    
-    alt Distance > 1000m
-        Backend-->>Frontend: HTTP 403 { "detail": "Location too far from session (1420m, max 1000m)" }
-    else Distance <= 1000m
-        Backend->>Database: Check Idempotency & INSERT Record (status: 'PRESENT')
-        alt Already Claimed
-            Backend-->>Frontend: HTTP 200 { status: "ALREADY_RECORDED", verified_at }
-        else First Claim Success
-            Backend-->>WebSocket: Broadcast Check-in Event
-            WebSocket-->>Frontend: Animate Student Badge on Projector!
-            Backend-->>Frontend: HTTP 200 { status: "PRESENT", verified_at, distance_m: 95 }
-        end
-    end
 ```
 
 ---
@@ -247,89 +236,35 @@ sequenceDiagram
 ## 5. Complete API Endpoint Specifications
 
 ### 5.1 Authentication (`/api/auth`)
-* `POST /api/auth/register` — Register User (`name`, `email`, `password`, `role`).
+* `POST /api/auth/register` — Register User (`full_name_ar`, `email`, `password`, `national_id`, `phone_number`, `role`). Validates NID checksum & hashes NID.
+* `POST /api/auth/verify-phone` — Verify phone number via 6-digit OTP code (`phone_verified = true`).
 * `POST /api/auth/login` — Returns Short-Lived Access Token (15 mins) + Refresh Token (7 days).
 * `POST /api/auth/refresh` — Issue new short-lived access token using valid refresh token.
-* `POST /api/auth/logout` — Revoke active token (adds JWT ID `jti` to `revoked_tokens` table).
+* `POST /api/auth/logout` — Revoke active token (`jti` added to `revoked_tokens`).
 * `GET /api/auth/me` — Fetch active user profile.
 
 ### 5.2 Courses (`/api/courses`)
 * `POST /api/courses` — Create Course (Instructor).
 * `GET /api/courses` — List user's courses.
 * `POST /api/courses/join` — Join course via 8-character `join_code` (Student).
-* `GET /api/courses/{id}/roster` — Fetch enrolled roster with overall student attendance rates (Instructor).
-* `POST /api/courses/{id}/import-roster` — Bulk CSV import of student emails for auto-enrollment (Instructor).
+* `GET /api/courses/{id}/roster` — Enrolled roster with Arabic names & attendance rates (Instructor).
+* `POST /api/courses/{id}/import-roster` — Bulk CSV import of student emails/NIDs (Instructor).
 * `GET /api/courses/{id}/export-matrix` — Download course-wide attendance matrix (CSV).
 
 ### 5.3 Sessions (`/api/sessions`)
-* `POST /api/sessions/start` — Start new attendance session (`course_id`, `instructor_lat`, `instructor_lng`, `geofence_radius_m`).
-* `GET /api/sessions/{id}/qr` — Fetch rotating QR code token (Base64).
-* `POST /api/sessions/{id}/end` — **Close Active Session** (Flips `is_active = false`, sets `ended_at = NOW()`).
-* `GET /api/sessions/{id}/export` — **Export Session CSV** (`student_name`, `email`, `verified_at`, `status`, `distance_m`).
+* `POST /api/sessions/start` — Start attendance session (`course_id`, `instructor_lat`, `instructor_lng`, `geofence_radius_m`).
+* `GET /api/sessions/{id}/qr` — Fetch active rotating QR code token.
+* `POST /api/sessions/{id}/end` — Close session (`is_active = false`, `ended_at = NOW()`).
+* `GET /api/sessions/{id}/export` — Export Session CSV (`student_name_ar`, `email`, `verified_at`, `status`, `distance_m`).
 
 ### 5.4 Attendance & Student Stats (`/api/attendance`, `/api/students`)
-* `POST /api/attendance/scan` — Submit QR payload (`session_id`, `token`, `lat`, `lng`).  
-  * **Idempotent Handling**: Re-scanning returns HTTP 200 with `{ "status": "ALREADY_RECORDED", "message": "Attendance already recorded for this session" }`.
-  * **Geofence Check**: Distance $> \text{geofence\_radius\_m}$ returns HTTP 403 (`"Location too far from session (1420m, max 1000m)"`).
+* `POST /api/attendance/scan` — Submit fast-path QR payload (`session_id`, `token`, `lat`, `lng`).
 * `GET /api/students/attendance-history` — Fetch student's global and per-course attendance stats (e.g. `94% Overall`).
-* `WS /ws/sessions/{id}/live-feed` — WebSocket endpoint pushing real-time check-in events to instructor projector screen.
+* `WS /ws/sessions/{id}/live-feed` — WebSocket streaming real-time check-ins to instructor screen.
 
 ---
 
-## 6. Directory Structure & File Organization
-
-```
-attendify-lite/
-├── app/                          # FastAPI Backend
-│   ├── api/                      # Route Handlers
-│   │   ├── auth.py               # Auth, Refresh, Revocation
-│   │   ├── courses.py            # Course CRUD, Roster, Bulk CSV
-│   │   ├── sessions.py           # Start/End Session, Dynamic Geofence Anchor, CSV Export
-│   │   ├── attendance.py         # Scan QR (Idempotent), Rates, Haversine Check
-│   │   └── websockets.py         # Realtime Projector Feed WS
-│   ├── core/                     # Configurations & Security
-│   │   ├── config.py             # Env Variables (Settings)
-│   │   ├── security.py           # JWT Hashing, Revocation Checks
-│   │   ├── rate_limiter.py       # Slowapi Rate Limiting
-│   │   └── qr_engine.py          # HMAC-SHA256 & Haversine Distance Engine
-│   ├── db/                       # Database Setup
-│   │   └── database.py           # SQLAlchemy Engine & Session
-│   ├── models/                   # SQLAlchemy Models
-│   │   └── models.py             # User, Course, Session, Attendance, RevokedToken
-│   ├── schemas/                  # Pydantic Request/Response DTOs
-│   │   └── schemas.py
-│   └── main.py                   # FastAPI Application Entrypoint
-│
-├── frontend/                     # React 19 + Vite Frontend
-│   ├── src/
-│   │   ├── components/           # Reusable UI Components
-│   │   │   ├── ui/               # Buttons, Cards, Inputs, Badges
-│   │   │   ├── QRProjector.tsx   # Rotating QR + WebSocket Live Roster
-│   │   │   └── QRScanner.tsx     # Mobile Camera + Geolocation Capture
-│   │   ├── pages/                # Application Views
-│   │   │   ├── AuthPage.tsx      # Login / Signup
-│   │   │   ├── InstructorDash.tsx# Courses, Roster, Bulk Import
-│   │   │   ├── LiveSession.tsx   # Projector View with WS Stream
-│   │   │   └── StudentDash.tsx   # Attendance Stats & Scan FAB
-│   │   ├── services/             # Axios / Fetch API Clients
-│   │   │   └── api.ts
-│   │   ├── types/                # TypeScript Interfaces
-│   │   │   └── database.types.ts
-│   │   ├── App.tsx               # Router Setup
-│   │   └── main.tsx              # React Root
-│   ├── index.html
-│   ├── package.json
-│   ├── tailwind.config.js
-│   └── vite.config.ts
-│
-├── Dockerfile                    # Containerization Spec
-├── requirements.txt              # Python Dependencies
-└── README.md
-```
-
----
-
-## 7. Step-by-Step 100% Free Cloud Deployment Setup
+## 6. Step-by-Step 100% Free Cloud Deployment Setup
 
 | Component | Host | Free Tier Plan |
 | :--- | :--- | :--- |
@@ -342,6 +277,7 @@ attendify-lite/
 ```env
 # Backend Environment (.env.example)
 SECRET_KEY=REPLACE_WITH_YOUR_32_CHARACTER_SECRET_KEY_HERE
+PEPPER_SECRET=REPLACE_WITH_A_RANDOM_32_CHAR_PEPPER_FOR_NID_HASHING
 DATABASE_URL=postgresql://postgres:<YOUR_PASSWORD>@db.<YOUR_PROJECT_REF>.supabase.co:5432/postgres
 JWT_ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=15
