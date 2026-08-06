@@ -9,3 +9,4 @@ python-multipart==0.0.9
 Pillow==12.2.0
 numpy==1.26.4
 email-validator
+psycopg2-binary>=2.9.9
