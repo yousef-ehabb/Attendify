@@ -1,21 +1,22 @@
 # Attendify Lite: Master System Specification & Design System
 **Project Codename**: Attendify Lite  
-**Document Version**: 2.1.0  
+**Document Version**: 2.2.0  
 **Target Architecture**: React 19 (Vite) + FastAPI (Python 3.10+) + Supabase PostgreSQL  
 
 ---
 
 ## 1. Executive Overview & Design Philosophy
 
-**Attendify Lite** is a high-performance, mobile-first classroom management and attendance tracking platform. It replaces heavy machine learning / facial recognition dependencies with cryptographically signed, rotating QR codes paired with role-based user accounts and optional geofencing.
+**Attendify Lite** is a high-performance, mobile-first classroom management and attendance tracking platform. It replaces heavy machine learning / facial recognition dependencies with cryptographically signed, rotating QR codes paired with role-based user accounts and dynamic instructor-anchored geofencing.
 
 ### Key Architectural Tenets:
 1. **Zero-Friction Access**: Students scan and claim attendance in < 3 seconds using any smartphone browser.
 2. **Cryptographic Anti-Spoofing**: Rotating HMAC-SHA256 QR tokens with 15–30 second lifetimes eliminate remote picture/screenshot sharing.
-3. **Multi-Factor Verification**: Optional browser Geofencing (GPS radius check within 50m) and Late-Join grace window calculations.
-4. **Aesthetic Excellence**: Built with a state-of-the-art dark mode UI, glassmorphism, dynamic animations, and intuitive micro-interactions.
-5. **Real-time Synchronization**: WebSockets / Server-Sent Events (SSE) feed live attendee counts directly to classroom projectors without polling.
-6. **100% Free Hosting Ready**: Zero heavy C++ binary requirements—runs seamlessly on Vercel, Netlify, Render, Koyeb, and Supabase.
+3. **Dynamic Instructor-Anchored Geofencing**: When starting a session, the instructor's device location becomes the live anchor point ($1\,\text{km}$ default radius).
+4. **Realistic Security Posture**: Clearly defined Threat Model separating off-campus remote sharing prevention from in-room proxy attendance.
+5. **Aesthetic Excellence**: Built with a state-of-the-art dark mode UI, glassmorphism, dynamic animations, and intuitive micro-interactions.
+6. **Real-time Synchronization**: WebSockets / Server-Sent Events (SSE) feed live attendee counts directly to classroom projectors without polling.
+7. **100% Free Hosting Ready**: Zero heavy C++ binary requirements—runs seamlessly on Vercel, Netlify, Render, Koyeb, and Supabase.
 
 ---
 
@@ -71,26 +72,6 @@ Attendify Lite uses a modern, deep dark-mode visual aesthetic with high-contrast
 
 ---
 
-### 2.3 Component Specifications
-
-#### A. Rotating QR Projector Container (Instructor View)
-* **Visual Style**: Large centered card (`380px x 380px`) with a neon indigo radial glow background.
-* **Countdown Ring**: Circular SVG progress bar showing remaining seconds (30s ➔ 0s) before auto-rotating.
-* **Realtime Feed Integration**: Live WebSocket connection rendering check-in avatars as they occur.
-
-#### B. Mobile QR Camera Scanner (Student View)
-* **Overlay**: Fullscreen modal overlay with dark backdrop blur (`backdrop-filter: blur(12px)`).
-* **Viewfinder**: Square scanning reticle (`260px x 260px`) with animated green corner brackets.
-* **GPS Check (Optional)**: Requests `navigator.geolocation.getCurrentPosition()` prior to token payload submission.
-* **Scan Feedback**: Trigger haptic vibration (`navigator.vibrate(200)`) and display status modal (`PRESENT` = Green Checkmark, `LATE` = Amber Clock).
-
-#### C. Status Badges
-* `PRESENT`: Emerald background (`#10b98120`), green text, checkmark icon.
-* `LATE`: Amber background (`#f59e0b20`), gold text, clock icon.
-* `ABSENT`: Rose background (`#ef444420`), red text, cross icon.
-
----
-
 ## 3. Database Schema (Production PostgreSQL Specification)
 
 ```sql
@@ -115,16 +96,13 @@ CREATE TABLE public.revoked_tokens (
     expires_at TIMESTAMPTZ NOT NULL
 );
 
--- 3. Courses Table (Supports Optional Geofence Lat/Long)
+-- 3. Courses Table
 CREATE TABLE public.courses (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name VARCHAR(150) NOT NULL,
     code VARCHAR(50) NOT NULL UNIQUE,
     join_code VARCHAR(8) NOT NULL UNIQUE,
     instructor_id BIGINT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
-    latitude DOUBLE PRECISION,             -- Optional Classroom Geofence Latitude
-    longitude DOUBLE PRECISION,            -- Optional Classroom Geofence Longitude
-    geofence_radius_meters INT DEFAULT 50, -- Allowed distance tolerance (default 50 meters)
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -137,12 +115,15 @@ CREATE TABLE public.course_enrollments (
     CONSTRAINT uq_course_student UNIQUE (course_id, student_id)
 );
 
--- 5. Attendance Sessions Table
+-- 5. Attendance Sessions Table (Includes Dynamic Instructor Geofence Anchor)
 CREATE TABLE public.sessions (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     course_id BIGINT NOT NULL REFERENCES public.courses(id) ON DELETE CASCADE,
     session_secret VARCHAR(64) NOT NULL,
-    late_threshold_minutes INT NOT NULL DEFAULT 10, -- Scans after N minutes marked as LATE
+    late_threshold_minutes INT NOT NULL DEFAULT 10,
+    instructor_lat DOUBLE PRECISION,                     -- Live Anchor Latitude
+    instructor_lng DOUBLE PRECISION,                     -- Live Anchor Longitude
+    geofence_radius_m INT NOT NULL DEFAULT 1000,         -- 1000m (1km) Campus Radius
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     ended_at TIMESTAMPTZ,
     is_active BOOLEAN NOT NULL DEFAULT TRUE
@@ -154,13 +135,14 @@ CREATE TABLE public.attendance (
     session_id BIGINT NOT NULL REFERENCES public.sessions(id) ON DELETE CASCADE,
     student_id BIGINT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
     status VARCHAR(20) NOT NULL DEFAULT 'PRESENT' CHECK (status IN ('PRESENT', 'LATE', 'EXCUSED')),
-    student_latitude DOUBLE PRECISION,
-    student_longitude DOUBLE PRECISION,
+    student_lat DOUBLE PRECISION,                        -- Scanned Geolocation
+    student_lng DOUBLE PRECISION,
+    distance_from_instructor_m DOUBLE PRECISION,         -- Computed Distance
     verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_session_student_attendance UNIQUE (session_id, student_id)
 );
 
--- Indexes for Fast Querying
+-- Performance Indexes
 CREATE INDEX idx_users_email ON public.users(email);
 CREATE INDEX idx_courses_join_code ON public.courses(join_code);
 CREATE INDEX idx_sessions_course ON public.sessions(course_id);
@@ -171,22 +153,58 @@ CREATE INDEX idx_attendance_student ON public.attendance(student_id);
 
 ---
 
-## 4. Cryptographic Engine & Security Architecture
+## 4. Cryptographic Engine, Geofencing & Threat Analysis
 
-### 4.1 HMAC-SHA256 Token Rotation Algorithm
-1. **Secret Key**: Every session creates a cryptographically random `session_secret` (32 bytes).
-2. **Time Slice**: Time is divided into 15-second windows (`time_slice = unix_timestamp // 15`).
-3. **Token Sign**: `token = HMAC_SHA256(session_secret, session_id + time_slice)`.
-4. **Validation Window**: The backend accepts tokens from `time_slice` and `time_slice - 1` (30s grace period).
+### 4.1 Dynamic Instructor Geofence Anchor Mechanism
 
-### 4.2 Rate Limiting & Anti-Bruteforce Defense
-To prevent automated script attacks guessing tokens:
-* **Endpoint Protection**: `/api/attendance/scan` enforces a strict rate limit of **5 requests per minute per IP / User ID** (using `slowapi` or Redis token bucket).
+1. **Session Anchor Creation**: When an instructor clicks **"Start Session"**, the frontend captures their device location once via `navigator.geolocation.getCurrentPosition()` and posts `instructor_lat` and `instructor_lng` to `/api/sessions/start`.
+2. **Student Claim Verification**: When a student scans the QR code, the mobile browser captures `student_lat` and `student_lng` and posts them to `/api/attendance/scan`.
+3. **Haversine Distance Formula**:
+   The backend computes distance $d$ in meters between student and instructor:
+   $$\Delta \phi = \text{lat}_2 - \text{lat}_1, \quad \Delta \lambda = \text{lng}_2 - \text{lng}_1$$
+   $$a = \sin^2\left(\frac{\Delta \phi}{2}\right) + \cos(\text{lat}_1)\cos(\text{lat}_2)\sin^2\left(\frac{\Delta \lambda}{2}\right)$$
+   $$d = 2 \cdot R \cdot \arcsin(\sqrt{a}) \quad \text{where } R = 6,371,000 \text{ meters}$$
 
-### 4.3 Geofencing Distance Calculation (Haversine Formula)
-If a course has `latitude` and `longitude` defined, `/api/attendance/scan` calculates distance:
-$$\text{distance} = 2r \arcsin \left( \sqrt{\sin^2\left(\frac{\Delta \phi}{2}\right) + \cos(\phi_1)\cos(\phi_2)\sin^2\left(\frac{\Delta \lambda}{2}\right)} \right)$$
-If $\text{distance} > \text{geofence\_radius\_meters}$, the scan is rejected with HTTP 403 (`"Outside classroom boundary"`).
+If $d > \text{geofence\_radius\_m}$ (default $1000\,\text{m}$), the claim is rejected with `HTTP 403 Forbidden`:
+`{ "detail": "Location too far from session (1420m, max 1000m)" }`
+
+---
+
+### 4.2 Realistic Threat Model & Security Posture
+
+It is critical to distinguish what this two-factor verification architecture defends against versus its limitations:
+
+```
++-----------------------------------------------------------------------------------------+
+|                                    THREAT MODEL MATRIX                                  |
++-----------------------------------------------------------------------------------------+
+| Threat Vector                  | Mitigated By                | Protection Status        |
++--------------------------------+-----------------------------+--------------------------+
+| Off-Campus Remote QR Sharing   | 1000m Geofence Check        | FULLY PREVENTED          |
+| (Student in another city/dorm) |                             |                          |
++--------------------------------+-----------------------------+--------------------------+
+| Screenshot Texting             | 15-second Rotating HMAC     | FULLY PREVENTED          |
+| (Student sends photo)          | Token                       |                          |
++--------------------------------+-----------------------------+--------------------------+
+| In-Class Friend Proxy          | Requires physical attendance| Partially Mitigated      |
+| (Friend scans inside room)     | or phone swap in room       | (Needs ML / Biometrics)  |
++--------------------------------+-----------------------------+--------------------------+
+| DevTools Mock Location         | Server Haversine Check      | Raises Barrier for Casual|
+| (Faking GPS in DevTools)       |                             | Cheating                 |
++--------------------------------+-----------------------------+--------------------------+
+```
+
+> **Why a 1 km (1000m) Default Geofence?**
+> * **Zero Building Setup**: No manual configuration of building lat/long required.
+> * **Eliminates Indoor GPS Jitter**: Concrete walls and indoor attenuation cause $20\text{--}50\,\text{m}$ of GPS error. A $1000\,\text{m}$ boundary eliminates false rejections for legitimate students inside classrooms while guaranteeing off-campus remote sharing is impossible.
+
+---
+
+### 4.3 Graceful Location Permission Fallback
+
+If a student's browser blocks location access:
+* **UI Guidance**: The mobile scanner presents an explicit helper modal: `"Location access is required to confirm campus presence. Please enable location permissions in browser settings."`
+* **Optional Instructor Override**: Scans without location payloads can be recorded with `status = 'FLAGGED_UNVERIFIED'` for instructor manual review rather than hard-failing without explanation.
 
 ```mermaid
 sequenceDiagram
@@ -198,28 +216,28 @@ sequenceDiagram
     participant WebSocket
     participant Database
 
-    Instructor->>Frontend: Click "Start Session"
-    Frontend->>Backend: POST /api/sessions/start {course_id, late_threshold_minutes}
-    Backend->>Database: Create Session & Secret
-    Backend-->>Frontend: Session Started (ID: 101)
+    Instructor->>Frontend: Click "Start Session" (Fetch Device GPS)
+    Frontend->>Backend: POST /api/sessions/start {course_id, instructor_lat, instructor_lng, geofence_radius_m: 1000}
+    Backend->>Database: Store Session Anchor (30.0444, 31.2357)
+    Backend-->>Frontend: Session Created (ID: 101)
     
     Frontend->>WebSocket: Connect WS /ws/sessions/101/live-feed
     
-    Student->>Frontend: Scan QR Code (Gps Lat/Lng attached)
-    Frontend->>Backend: POST /api/attendance/scan {token, session_id, lat, lng} (Rate Limited)
+    Student->>Frontend: Scan QR Code (Fetch Mobile GPS)
+    Frontend->>Backend: POST /api/attendance/scan {token, session_id, lat: 30.0450, lng: 31.2360}
     
-    alt Rate Limit Exceeded
-        Backend-->>Frontend: HTTP 429 "Too Many Requests"
-    else Token & GPS Valid
-        Backend->>Database: Calculate Late vs Present & INSERT Record
-        alt Idempotent Check (Already Claimed)
-            Database-->>Backend: Duplicate Key Warning
+    Backend->>Backend: Compute Haversine Distance (d = 95m)
+    
+    alt Distance > 1000m
+        Backend-->>Frontend: HTTP 403 { "detail": "Location too far from session (1420m, max 1000m)" }
+    else Distance <= 1000m
+        Backend->>Database: Check Idempotency & INSERT Record (status: 'PRESENT')
+        alt Already Claimed
             Backend-->>Frontend: HTTP 200 { status: "ALREADY_RECORDED", verified_at }
         else First Claim Success
-            Database-->>Backend: Insert OK (status: 'PRESENT' or 'LATE')
-            Backend-->>WebSocket: Broadcast Event { student_name, status, timestamp }
-            WebSocket-->>Frontend: Animate Student Badge on Projector Screen!
-            Backend-->>Frontend: HTTP 200 { status: "PRESENT", verified_at }
+            Backend-->>WebSocket: Broadcast Check-in Event
+            WebSocket-->>Frontend: Animate Student Badge on Projector!
+            Backend-->>Frontend: HTTP 200 { status: "PRESENT", verified_at, distance_m: 95 }
         end
     end
 ```
@@ -236,7 +254,7 @@ sequenceDiagram
 * `GET /api/auth/me` — Fetch active user profile.
 
 ### 5.2 Courses (`/api/courses`)
-* `POST /api/courses` — Create Course (Instructor). Includes optional `latitude`, `longitude`, `geofence_radius_meters`.
+* `POST /api/courses` — Create Course (Instructor).
 * `GET /api/courses` — List user's courses.
 * `POST /api/courses/join` — Join course via 8-character `join_code` (Student).
 * `GET /api/courses/{id}/roster` — Fetch enrolled roster with overall student attendance rates (Instructor).
@@ -244,14 +262,15 @@ sequenceDiagram
 * `GET /api/courses/{id}/export-matrix` — Download course-wide attendance matrix (CSV).
 
 ### 5.3 Sessions (`/api/sessions`)
-* `POST /api/sessions/start` — Start new attendance session (`course_id`, `late_threshold_minutes`).
+* `POST /api/sessions/start` — Start new attendance session (`course_id`, `instructor_lat`, `instructor_lng`, `geofence_radius_m`).
 * `GET /api/sessions/{id}/qr` — Fetch rotating QR code token (Base64).
 * `POST /api/sessions/{id}/end` — **Close Active Session** (Flips `is_active = false`, sets `ended_at = NOW()`).
-* `GET /api/sessions/{id}/export` — **Export Session CSV** (`student_name`, `email`, `verified_at`, `status`).
+* `GET /api/sessions/{id}/export` — **Export Session CSV** (`student_name`, `email`, `verified_at`, `status`, `distance_m`).
 
 ### 5.4 Attendance & Student Stats (`/api/attendance`, `/api/students`)
-* `POST /api/attendance/scan` — Submit QR payload (`session_id`, `token`, optional `lat`, `lng`).  
+* `POST /api/attendance/scan` — Submit QR payload (`session_id`, `token`, `lat`, `lng`).  
   * **Idempotent Handling**: Re-scanning returns HTTP 200 with `{ "status": "ALREADY_RECORDED", "message": "Attendance already recorded for this session" }`.
+  * **Geofence Check**: Distance $> \text{geofence\_radius\_m}$ returns HTTP 403 (`"Location too far from session (1420m, max 1000m)"`).
 * `GET /api/students/attendance-history` — Fetch student's global and per-course attendance stats (e.g. `94% Overall`).
 * `WS /ws/sessions/{id}/live-feed` — WebSocket endpoint pushing real-time check-in events to instructor projector screen.
 
@@ -265,14 +284,14 @@ attendify-lite/
 │   ├── api/                      # Route Handlers
 │   │   ├── auth.py               # Auth, Refresh, Revocation
 │   │   ├── courses.py            # Course CRUD, Roster, Bulk CSV
-│   │   ├── sessions.py           # Start/End Session, QR Engine, CSV Export
-│   │   ├── attendance.py         # Scan QR (Idempotent), Rates, Geofence
+│   │   ├── sessions.py           # Start/End Session, Dynamic Geofence Anchor, CSV Export
+│   │   ├── attendance.py         # Scan QR (Idempotent), Rates, Haversine Check
 │   │   └── websockets.py         # Realtime Projector Feed WS
 │   ├── core/                     # Configurations & Security
 │   │   ├── config.py             # Env Variables (Settings)
 │   │   ├── security.py           # JWT Hashing, Revocation Checks
 │   │   ├── rate_limiter.py       # Slowapi Rate Limiting
-│   │   └── qr_engine.py          # HMAC-SHA256 & Haversine Distance
+│   │   └── qr_engine.py          # HMAC-SHA256 & Haversine Distance Engine
 │   ├── db/                       # Database Setup
 │   │   └── database.py           # SQLAlchemy Engine & Session
 │   ├── models/                   # SQLAlchemy Models
@@ -286,7 +305,7 @@ attendify-lite/
 │   │   ├── components/           # Reusable UI Components
 │   │   │   ├── ui/               # Buttons, Cards, Inputs, Badges
 │   │   │   ├── QRProjector.tsx   # Rotating QR + WebSocket Live Roster
-│   │   │   └── QRScanner.tsx     # Mobile Camera + Geolocation Scanner
+│   │   │   └── QRScanner.tsx     # Mobile Camera + Geolocation Capture
 │   │   ├── pages/                # Application Views
 │   │   │   ├── AuthPage.tsx      # Login / Signup
 │   │   │   ├── InstructorDash.tsx# Courses, Roster, Bulk Import
